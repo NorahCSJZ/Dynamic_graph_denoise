@@ -59,7 +59,7 @@ class Spatial_Attention_1(nn.Module):
         self.V1_h1 = nn.Parameter(torch.empty(size=(L11, n_dim), dtype=torch.float64))
         nn.init.trunc_normal_(self.V1_h1.data, mean=-0.1, std=0.1)
 
-        self.w1_h1 = nn.Parameter(torch.empty(size=2*L11, dtype=torch.float64))
+        self.w1_h1 = nn.Parameter(torch.empty(2*L11, dtype=torch.float64))
         nn.init.trunc_normal_(self.w1_h1.data, mean=-0.1, std=0.1)
 
         self.softmax = nn.Softmax(dim=0)
@@ -203,13 +203,13 @@ class GRU_neighbor(nn.Module):
         self.Wh_2 = nn.Parameter(torch.empty(size=(M, n_dim*2), dtype=torch.float64))
         nn.init.trunc_normal_(self.Wh_2.data, mean=-0.1, std=0.1)
 
-        self.bz = nn.Parameter(torch.zeros(size=M, dtype=torch.float64))
+        self.bz = nn.Parameter(torch.zeros(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.bz.data)
-        self.br1 = nn.Parameter(torch.zeros(size=M, dtype=torch.float64))
+        self.br1 = nn.Parameter(torch.zeros(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.br1.data)
-        self.br2 = nn.Parameter(torch.zeros(size=n_dim, dtype=torch.float64))
+        self.br2 = nn.Parameter(torch.zeros(n_dim, dtype=torch.float64))
         nn.init.trunc_normal_(self.br2.data)
-        self.bh = nn.Parameter(torch.zeros(size=n_dim, dtype=torch.float64))
+        self.bh = nn.Parameter(torch.zeros(n_dim, dtype=torch.float64))
         nn.init.trunc_normal_(self.bh.data)
 
         self.saps_idx = saps_idx
@@ -283,11 +283,11 @@ class GRU_Topology(nn.Module):
         self.Wh_2_tp = nn.Parameter(torch.empty(size=(M, dim_redu), dtype=torch.float64))
         nn.init.trunc_normal_(self.Wh_2_tp.data, mean=-0.1, std=0.1)
 
-        self.bz_tp = nn.Parameter(torch.zeros(size=M, dtype=torch.float64))
+        self.bz_tp = nn.Parameter(torch.zeros(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.bz_tp.data, std=0.1)
-        self.br1_tp = nn.Parameter(torch.ones(size=M, dtype=torch.float64))
+        self.br1_tp = nn.Parameter(torch.ones(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.br1_tp.data, std=0.1)
-        self.bh_tp = nn.Parameter(torch.ones(size=M, dtype=torch.float64))
+        self.bh_tp = nn.Parameter(torch.ones(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.bh_tp.data, std=0.1)
 
 
@@ -346,7 +346,7 @@ class Temporal_Attention(nn.Module):
         self.W = nn.Parameter(torch.empty(size=(r, L), dtype=torch.float64))
         nn.init.trunc_normal_(self.W.data, mean=-0.1, std=0.1)
         self.V = nn.Parameter(torch.zeros(size=(L, 2*M), dtype=torch.float64))
-        nn.init.trunc_normal_(self.b.data, mean=-0.1, std=0.1)
+        nn.init.trunc_normal_(self.V.data, mean=-0.1, std=0.1)
         self.tanh = torch.nn.Tanh()
         self.softmax = torch.nn.Softmax(dim=1)
 
@@ -378,7 +378,7 @@ class Topo_Attention(nn.Module):
         for i in range(T):
             h_comb = torch.concat([torch.unsqueeze(h_1[:, i, :], 1), torch.unsqueeze(h_2[:, i, :], 1)], 1)  # 6400*2*M
 
-            temp = F.tanh(torch.einsum('ij,jkl->ikl', self.V_tp, torch.transpose(h_comb, perm=[2, 1, 0])))  # L_tp*2*6400
+            temp = F.tanh(torch.einsum('ij,jkl->ikl', self.V_tp, torch.permute(h_comb, (2, 1, 0))))  # L_tp*2*6400
             if i == 0:
                 A = F.softmax(torch.einsum('ij,jkl->ikl', self.w_tp, temp), dim=1)  # 1*2*6400
             else:
@@ -392,7 +392,7 @@ class MLP_1(nn.Module):
         super(MLP_1, self).__init__()
         self.W = nn.Parameter(torch.empty(size=(r*2*M, num_classes), dtype=torch.float64))
         nn.init.trunc_normal_(self.W.data, mean=-0.1, std=0.1)
-        self.b = nn.Parameter(torch.zeros(size=num_classes, dtype=torch.float64))
+        self.b = nn.Parameter(torch.zeros(num_classes, dtype=torch.float64))
         nn.init.trunc_normal_(self.b.data, mean=-0.1, std=0.1)
 
     def forward(self, x):
@@ -405,10 +405,9 @@ class Model(nn.Module):
     def __init__(self, Fea, Topo,
                                 n_hidden_units):
         super(Model, self).__init__()
-        self.gru_neighbor = GRU_neighbor(Fea, self.samples_idx_batch, self.support_sizes_batch,
-                                n_hidden_units)
-        self.gru_topo = GRU_Topology(Topo,
-                            n_hidden_units)
+        self.Fea = Fea
+        self.Topo = Topo
+        self.n_hidden_units = n_hidden_units
         self.topo_attention = Topo_Attention()  # topo_att_indi_attention(h_list_tensor, h_list_tensor_topo)
         self.mlp1 = MLP_1()
         self.tem_attention = Temporal_Attention()
@@ -416,6 +415,10 @@ class Model(nn.Module):
     def add_parameter(self,samples_idx_batch, support_sizes_batch):
         self.samples_idx_batch = samples_idx_batch
         self.support_sizes_batch = support_sizes_batch
+        self.gru_neighbor = GRU_neighbor(self.Fea, self.samples_idx_batch, self.support_sizes_batch,
+                                         self.n_hidden_units)
+        self.gru_topo = GRU_Topology(self.Topo,
+                                     self.n_hidden_units)
 
     def forward(self, x):
         h_list_tensor, Beta = self.gru_neighbor(x)
@@ -446,9 +449,9 @@ class MLP_3(nn.Module):
         self.relu = nn.ReLU()
         self.W2 = nn.Parameter(torch.empty(size=(32, 1), dtype=torch.float64))
         nn.init.trunc_normal_(self.W2.data, mean=-0.1, std=0.1)
-        self.b1 = nn.Parameter(torch.zeros(size=32, dtype=torch.float64))
+        self.b1 = nn.Parameter(torch.zeros(32, dtype=torch.float64))
         nn.init.trunc_normal_(self.b1.data, mean=-0.1, std=0.1)
-        self.b2 = nn.Parameter(torch.zeros(size=1, dtype=torch.float64))
+        self.b2 = nn.Parameter(torch.zeros(1, dtype=torch.float64))
         nn.init.trunc_normal_(self.b2.data, mean=-0.1, std=0.1)
 
     def forward(self, x):
@@ -487,305 +490,11 @@ def get_dimension(file):
 def merge_list(list1, list2):
     return list1 + list2
 
-# def temporal_attention(h_list_tensor):
-#     # h_list_tensor: 6400*T*2M
-#     # V: L*2M
-#     # W: r*L
-#
-#     #A = tf.transpose(tf.nn.softmax(tf.matmul(W, tf.multiply(tf.tanh(tf.matmul(V, tf.transpose(h_list_tensor))), tf.sigmoid(tf.matmul(U, tf.transpose(h_list_tensor)))))))
-#
-#     temp = tf.tanh(torch.einsum('ij,jkl->ikl', V, tf.transpose(h_list_tensor, perm=[2,1,0]))) # L*T*6400
-#     A = tf.nn.softmax(tf.einsum('ij,jkl->ikl', W, temp), dim=1) #r*T*6400
-#
-#     return tf.transpose(A, perm=[2,0,1]) #6400*r*T
-
-# def topo_att_indi_attention(h_1, h_2):
-#     # h_1, h_2: 6400*T*M
-#     # V_tp: L_tp*M
-#     # w_tp: 1*L_tp
-#
-#     T = h_1.shape[1]
-#     for i in range(T):
-#         h_comb = torch.concat([torch.unsqueeze(h_1[:,i,:], 1), torch.unsqueeze(h_2[:,i,:], 1)], 1) # 6400*2*M
-#
-#         temp = F.tanh(torch.einsum('ij,jkl->ikl', V_tp, tf.transpose(h_comb, perm=[2,1,0]))) # L_tp*2*6400
-#         if i == 0:
-#             A = tf.nn.softmax(tf.einsum('ij,jkl->ikl', w_tp, temp), dim=1) #1*2*6400
-#         else:
-#             A = tf.concat([A, tf.nn.softmax(tf.einsum('ij,jkl->ikl', w_tp, temp), dim=1)], 0) #T*2*6400
-#
-#     return tf.transpose(A, perm=[2,1,0]) #6400*2*T
 
 def normalize(v):
     return F.normalize(v, dim=1, p=2, eps=1e-12)
 
-# def mi_gru(Fea_batch, Topo_batch, idx_batch, samples_idx_batch, support_sizes_batch, n_hidden_units):
-#     # weights['out']: (r*2M)*n_classes
-#     # biases['out']:  n_classes
-#     gru_neighbor = GRU_neighbor(Fea_batch, samples_idx_batch, support_sizes_batch,
-#                                 n_hidden_units)  # GRU_Neighbor(Fea_batch, idx_batch, samples_idx_batch, support_sizes_batch, n_hidden_units, num_stacked_layers)
-#     h_list_tensor, Beta = gru_neighbor(idx_batch)  # 6400*T*M; T*6400*[0]*(1+[1]/[0])
-#     gru_topo = GRU_Topology(Topo_batch,
-#                             n_hidden_units)  # GRU_Topology(Topo_batch, idx_batch, n_hidden_units)
-#     h_list_tensor_topo = gru_topo(idx_batch)  # 6400*T*M
-#
-#     topo_attention = Topo_Attention()  # topo_att_indi_attention(h_list_tensor, h_list_tensor_topo)
-#
-#     Gamma = topo_attention(h_list_tensor,
-#                                     h_list_tensor_topo)  # 6400*2*T
-#     h_1_tmp = torch.multiply(torch.permute(torch.unsqueeze(Gamma[:, 0, :], 1), (0, 2, 1)),
-#                              h_list_tensor)  # 6400*T*1 * 6400*T*M = 6400*T*M
-#     h_2_tmp = torch.multiply(torch.permute(torch.unsqueeze(Gamma[:, 1, :], 1), (0, 2, 1)),
-#                              h_list_tensor_topo)  # 6400*T*1 * 6400*T*M = 6400*T*M
-#
-#     h_att_topo = torch.concat([h_1_tmp, h_2_tmp], 2)  # 6400*T*2M
-#     print(h_att_topo)
-#
-#     # apply temporal attention
-#     Alpha = temporal_attention(h_att_topo)  # 6400*r*T
-#     print(Alpha)
-#
-#     temp = torch.matmul(Alpha, h_att_topo)  # 6400*r*2M
-#     shape = temp.shape[1] * temp.shape[2]
-#     temp1 = torch.reshape(temp, [-1, shape.type(torch.int32)])  # (6400)*(r*2M)
-#
-#     mlp1 = MLP_1()
-#     out = mlp1(temp1)
-#
-#     return out, h_list_tensor, Alpha, temp, Beta, Gamma, h_list_tensor_topo #6400*num_classes
 
-# def GRU_Topology(Topo, idx, n_h_units):
-# 	# Topo: 10000*50*dim_topo
-# 	# idx: 6400
-#
-#     ## GRU_Topo
-#     # Wz_tp   : 20*(20+42);   bz_tp : 20
-#     # Wr1_tp  : 20*(20+42);   br1_tp: 20
-#     # Wh_1_tp : 20*20;
-#     # Wh_2_tp : 20*42;
-#     # Wh   : [Wh_1,Wh_2];  bh_tp : 20
-#
-#     T     = Topo.get_shape()[1].value # T = 50
-#     n_dim = Topo.get_shape()[2].value # n_dim = 42
-#     idx   = idx.type(torch.int32)
-#     X     = torch.select(Topo, idx) # shape: 6400*50*42
-#
-#     for i in range(T):
-#         #print("index i in LSTM:", i)
-#         xt_temp = X[:,i,:] # 6400*42
-#         xt      = torch.transpose(xt_temp) # 42*6400
-#
-#         if i == 0:
-#             #print(Wh_2_tp)
-#             #print(xt)
-#             ht_temp  = tf.matmul(Wh_2_tp, xt) # (20*42)*(42*6400)=20*6400
-#             ht_tilde = tf.transpose(tf.tanh(tf.transpose(ht_temp) + bh_tp)) # 6400*20 + 20 -> 20*6400
-#             ht       = ht_tilde
-#
-#             hp       = ht #20*6400
-#             h_list_tensor = tf.expand_dims(hp, 1) # 20*1*6400
-#
-#         else:
-#             Wh    = tf.concat([Wh_1_tp,Wh_2_tp], 1)   # [20*20,20*42] -> 20*62
-#
-#             Wzr   = tf.concat([Wz_tp,Wr1_tp], 0)  # (20+20)*62
-#             bzr   = tf.concat([bz_tp,br1_tp], 0)  # (20+20)
-#
-#             zr_temp = tf.matmul(Wzr, tf.concat([hp, xt], 0)) # (40*62)*((20+42)*6400)=40*6400
-#             zr      = tf.transpose(tf.sigmoid(tf.transpose(zr_temp) + bzr)) # (20+20)*6400: zt, rt1
-#
-#             rt1      = zr[n_h_units:n_h_units*2,:] # 20*6400
-#             ht_temp  = tf.matmul(Wh, tf.concat([tf.multiply(rt1, hp), xt], 0)) # 20*6400
-#             ht_tilde = tf.transpose(tf.tanh(tf.transpose(ht_temp) + bh_tp)) # 6400*20 + 20 -> 20*6400
-#
-#             zt       = zr[0:n_h_units,:] # 20*6400
-#             zt_neg   = 1.0 - zt
-#             ht       = tf.multiply(zt_neg, hp) + tf.multiply(zt, ht_tilde)
-#
-#             hp       = ht # 20*6400
-#             h_list_tensor = tf.concat([h_list_tensor, tf.expand_dims(hp, 1)], 1) # 20*T*6400
-#
-#
-#     h_list_tensor = tf.transpose(h_list_tensor, perm=[2, 1, 0]) # 6400*T*20 (M=20)
-#
-#     return h_list_tensor
-
-
-# def GRU_Neighbor(Fea, idx, saps_idx, sup_sizes, n_h_units, num_stacked_layers):  #X_Nebr, n_h_units, num_stacked_layers
-#     # Fea: 10000*50*42
-# 	# idx: 6400
-# 	# saps_idx: 50*6400*(1+[0]+[1])
-# 	# sup_sizes: [[[0],[1]],...,[[0],[1]]]
-#
-# 	# X_Nebr: 6400*50*(42+42) ('6400' is dynamic)
-# 	# n_dim = 42
-# 	# n_h_units = 168
-#
-#     ## GRU
-#     # Wz   : 20*(20+42*2);   bz : 20
-#     # Wr1  : 20*(20+42*2);   br1: 20
-#     # Wr2_1: 42*20;
-#     # Wr2_2: 42*(42*2);
-#     # Wr2  : [Wr2_1,Wr2_2];  br2: 42
-#     # Wh_1 : 20*20;
-#     # Wh_2 : 20*(42*2);
-#     # Wh   : [Wh_1,Wh_2];    bh : 20
-#
-#     #d = tf.cast(n_hidden_units/n_dim, tf.int32) # d = 4
-#     T     = Fea.get_shape()[1].value # T = 50
-#     n_dim = Fea.get_shape()[2].value # n_dim = 42
-#     idx = torch.type(idx, torch.int32)
-#     X     = torch.select(Fea, idx) # shape: 6400*50*42
-#     #XN    = X_Nebr[:,:,n_dim:n_dim*2] # 6400*50*42
-#
-#     #print(len(sup_sizes))
-#     for i in range(T):
-#         #print("index i in LSTM:", i)
-#         xt_temp  = X[:,i,:] # 6400*42
-#         xt       = torch.transpose(xt_temp) # 42*6400
-#
-#         # shapes: 10000*42, 6400*(1+[0]+[1]), [[0],[1]], 6400
-#         xnt, Beta_step = aggregate_att_mean(Fea[:,i,:], saps_idx[i,:,:], sup_sizes[i], idx) # shape: 42*6400; 6400*[0]*(1+[1]/[0])
-#
-#         if i == 0:
-#             rt2_temp = tf.matmul(Wr2_2, torch.concat([xt, xnt], 0)) # (42*84)*((42+42)*6400)=42*6400  -- one layer network
-#             rt2      = torch.transpose(torch.sigmoid(torch.transpose(rt2_temp) + br2)) # 6400*42 + 42 -> 42*6400  --sigmoid
-#
-#             ht_temp  = tf.matmul(Wh_2, tf.concat([xt, tf.multiply(rt2, xnt)], 0)) # (20*84)*(84*6400)=20*6400
-#             ht_tilde = tf.transpose(tf.tanh(tf.transpose(ht_temp) + bh)) # 6400*20 + 20 -> 20*6400
-#             ht       = ht_tilde
-#
-#             hp       = ht #20*6400
-#             h_list_tensor = tf.expand_dims(hp, 1) # 20*1*6400
-#
-#             Beta = tf.expand_dims(Beta_step, 0) # 1*6400*[0]*(1+[1]/[0])
-#
-#         else:
-#             Wr2   = tf.concat([Wr2_1,Wr2_2], 1) # [42*20,42*84] -> 42*104
-#             Wh    = tf.concat([Wh_1,Wh_2], 1)   # [20*20,20*84] -> 20*104
-#             Wzr   = tf.concat([Wz,Wr1,Wr2], 0)  # (20+20+42)*104
-#             bzr   = tf.concat([bz,br1,br2], 0)  # (20+20+42)
-#
-#             zr_temp = tf.matmul(Wzr, tf.concat([hp, xt, xnt], 0)) # (82*104)*((20+42+42)*6400)=82*6400
-#             zr      = tf.transpose(tf.sigmoid(tf.transpose(zr_temp) + bzr)) # (20+20+42)*6400: zt, rt1, rt2
-#
-#             rt1      = zr[n_h_units:n_h_units*2,:] # 20*6400
-#             rt2      = zr[n_h_units*2:n_h_units*2+n_dim, :] # 42*6400
-#             ht_temp  = tf.matmul(Wh, tf.concat([tf.multiply(rt1, hp), xt, tf.multiply(rt2, xnt)], 0)) # 20*6400
-#             ht_tilde = tf.transpose(tf.tanh(tf.transpose(ht_temp) + bh)) # 6400*20 + 20 -> 20*6400
-#
-#             zt       = zr[0:n_h_units,:] # 20*6400
-#             zt_neg   = 1.0 - zt
-#             ht       = tf.multiply(zt_neg, hp) + tf.multiply(zt, ht_tilde)
-#
-#             hp       = ht # 20*6400
-#             h_list_tensor = tf.concat([h_list_tensor, tf.expand_dims(hp, 1)], 1) # 20*T*6400
-#
-#             Beta = tf.concat([Beta, tf.expand_dims(Beta_step, 0)], 0)  # (T)*6400*[0]*(1+[1]/[0])
-#
-#     h_list_tensor = tf.transpose(h_list_tensor, perm=[2, 1, 0]) # 6400*T*20 (M=20)
-#
-#     return h_list_tensor, Beta
-
-# def aggregate_mean(fea_mat,  samples,  sup_sizes, targets):
-#     # shapes: 10000*42, 6400*(1+[0]+[1]), [[0],[1]], 6400
-# 	# return xnt: 42*6400
-#
-#     sup_sizes = [1] + sup_sizes # [1, [0], [1]]
-#     #for i in range(len(sup_sizes)-1,0,-1): # '-1 0 -1'
-#     i = 2
-#     dim_temp = np.int32(sup_sizes[i]/sup_sizes[i-1])
-#     samples_temp = torch.reshape(samples[:,-sup_sizes[i]:], [-1, sup_sizes[i-1], dim_temp]) # shape: 6400*[0]*([1]/[0])
-#     fea_mat_samples_temp = tf.nn.embedding_lookup(fea_mat, samples_temp) # shape: 6400*[0]*([1]/[0])*42
-#     fea_hop_mean = tf.reduce_mean(fea_mat_samples_temp, 2) # shape: 6400*[0]*42
-#
-#     #fea_mat_samples_temp_1 = tf.sigmoid(tf.matmul(weights_hops[str(i-1)], tf.transpose(fea_hop_mean, perm=[2, 1, 0]))) # shape: (42,42)*(42*[0]*6400)=42*[0]*6400
-#     fea_mat_samples_temp_1 = tf.sigmoid(tf.einsum('ij,jkl->ikl', weights_hops[str(i-1)], tf.transpose(fea_hop_mean, perm=[2, 1, 0]))) # shape: (42,42)*(42*[0]*6400)=42*[0]*6400
-#     fea_hop_mean_1 = tf.reduce_mean(tf.transpose(fea_mat_samples_temp_1, perm=[2, 1, 0]), 1) # shape: 6400*42
-#     res = tf.sigmoid(tf.matmul(weights_hops[str(i-2)], tf.transpose(fea_hop_mean_1, perm=[1, 0]))) # shape: (42*42)*(42*6400)=42*6400
-#
-#     return res
-
-# def aggregate_att_mean(fea_mat,  samples,  sup_sizes, targets):
-#     # shapes: 10000*42, 6400*(1+[0]+[1]), [[0],[1]], 6400
-#     # return xnt: 42*6400
-#
-#     sup_sizes = [1] + sup_sizes # [1, [0], [1]]
-#     ## k=1: update node representations of Hop-0
-#     dim_temp = np.int32(sup_sizes[2]/sup_sizes[1])
-#     # gather neighbors at hop-1
-#     samples_temp = torch.reshape(samples[:,-sup_sizes[2]:], [-1, sup_sizes[1], dim_temp]) # shape: 6400*[0]*([1]/[0])
-#     fea_mat_samples_temp = torch.select(fea_mat, samples_temp) # shape: 6400*[0]*([1]/[0])*42 -- torch.nn.Embeddings
-#
-#     # gather target nodes for hop-1 and replicate attributes
-#     samples_temp_t = samples[:,-(sup_sizes[1]+sup_sizes[2]):-sup_sizes[2]] # shape: 6400*[0]
-#     target_temp = torch.unsqueeze(samples_temp_t, 2) # 6400*[0]*1
-#     target_temp = torch.tile(target_temp, [1,1,dim_temp]) # 6400*[0]*([1]/[0])
-#     fea_mat_samples_temp_t = torch.select(fea_mat, target_temp) # shape: 6400*[0]*([1]/[0])*42  -- torch.nn.Embeddings
-#
-#     # learn attention for hop-1
-#     fea_tar_samp = torch.concat([fea_mat_samples_temp_t, fea_mat_samples_temp], 3) # shape: 6400*[0]*([1]/[0])*84
-#     Beta_hop1 = spatial_attention_1(fea_tar_samp) # shape: 6400*[0]*([1]/[0])
-#
-#     # calculate neighbor representation
-#     #   V1_h1: L11*n_dim
-#     #   fea_mat_samples_temp: 6400*[0]*([1]/[0])*42
-#     temp_aam_0 = tf.einsum('ij,jklm->iklm', V1_h1, tf.transpose(fea_mat_samples_temp, perm=[3,2,1,0])) # shape: L11*([1]/[0])*[0]*6400
-#     temp_aam_1 = tf.matmul(tf.expand_dims(Beta_hop1, 2), tf.transpose(temp_aam_0, perm=[3,2,1,0])) # shape: 6400*[0]*1*L11 ???
-#     fea_hop_mean_att = tf.squeeze(temp_aam_1, squeeze_dims=2) # shape: 6400*[0]*L11
-#
-#     # concatenate and transform
-#     fea_mat_samples_temp_t_emb = tf.einsum('ij,jkl->ikl', V1_h1, tf.transpose(fea_mat_samples_temp_t[:,:,0,:], perm=[2,1,0])) # L11*[0]*6400
-#     con_hop1 = tf.concat([fea_mat_samples_temp_t_emb, tf.transpose(fea_hop_mean_att, perm=[2,1,0])], 0) # shape:(L11*2)*[0]*6400, dim_hop1=L11*2
-#     hop1 = tf.sigmoid(tf.einsum('ij,jkl->ikl', weights_hops['1'], con_hop1)) # shape: (dim_hop0,dim_hop1)*((L11*2),[0]*6400)=dim_hop0*[0]*6400
-#
-#     ## k=1: update node representations of nodes in batch
-#     dim_temp = np.int32(sup_sizes[1])
-#     # gather neighbors at hop-0
-#     samples_temp = samples[:,-(sup_sizes[1]+sup_sizes[2]):-sup_sizes[2]] # shape: 6400*[0]
-#     fea_mat_samples_temp = torch.select(fea_mat, samples_temp) # shape: 6400*[0]*42
-#     # gather target nodes for hop-0 and replicate attributes
-#     samples_temp_t = samples[:,0] # shape: 6400*1
-#     target_temp = torch.tile(torch.unsqueeze(samples_temp_t, 1), [1,dim_temp]) # 6400*[0]
-#     fea_mat_samples_temp_t = torch.select(fea_mat, target_temp) # shape: 6400*[0]*42
-#     # learn attention for hop-0
-#     fea_tar_samp = torch.concat([fea_mat_samples_temp_t, fea_mat_samples_temp], 2) # shape: 6400*[0]*84
-#     Beta_hop0 = spatial_attention_1(torch.unsqueeze(fea_tar_samp, 1)) # shape: 6400*1*[0]
-#     # calculate neighbor representation
-#     #   V1_h1: L11*n_dim
-#     #   fea_mat_samples_temp: 6400*[0]*42
-#     temp_aam_0 = tf.einsum('ij,jkl->ikl', V1_h1, tf.transpose(fea_mat_samples_temp, perm=[2,1,0])) # shape: L11*[0]*6400
-#     temp_aam_1 = tf.matmul(Beta_hop0, tf.transpose(temp_aam_0, perm=[2,1,0])) # shape: 6400*1*L11 ???
-#     fea_hop_mean_att = tf.squeeze(temp_aam_1, squeeze_dims=1) # shape: 6400*L11
-#
-#     # concatenate and transform
-#     fea_mat_samples_temp_t_emb = tf.einsum('ij,jk->ik', V1_h1, tf.transpose(fea_mat_samples_temp_t[:,0,:], perm=[1,0])) # L11*6400
-#     con_hop1 = tf.concat([fea_mat_samples_temp_t_emb, tf.transpose(fea_hop_mean_att, perm=[1,0])], 0) # shape: (L11*2)*6400, dim_hop1=L11*2
-#     hop0 = tf.sigmoid(tf.einsum('ij,jk->ik', weights_hops['1'], con_hop1)) # shape: (dim_hop0,dim_hop1)*((L11*2)*6400)=dim_hop0*6400
-#
-#
-#     ## k=2: generate neighbor representation
-#     dim_temp = np.int32(sup_sizes[1])
-#     # gather target nodes for hop-0 and replicate attributes
-#     target_temp = torch.unsqueeze(hop0, 1) # dim_hop0*1*6400
-#     target_temp = torch.tile(target_temp, [1,dim_temp,1]) # dim_hop0*[0]*6400
-#     # learn attention
-#     fea_tar_samp = torch.concat([target_temp, hop1], 0) # shape: (2*dim_hop0)*[0]*6400
-#     Beta_hop = spatial_attention_0(fea_tar_samp) # shape: 6400*[0]
-#
-#     # calculate neighbor representation
-#     #   V1_h0: L10*dim_hop0
-#     #   hop1: dim_hop0*[0]*6400
-#     temp_aam_0 = tf.einsum('ij,jkl->ikl', V1_h0, hop1) # shape: L10*[0]*6400
-#     temp_aam_1 = tf.matmul(tf.expand_dims(Beta_hop, 1), tf.transpose(temp_aam_0, perm=[2,1,0])) # shape: 6400*1*L10 ???
-#     fea_hop_mean_att = tf.squeeze(temp_aam_1, squeeze_dims=1) # shape: 6400*L10
-#
-#     ## concatenate spatial attention
-#     # Beta_hop1: 6400*[0]*([1]/[0])
-#     # Beta_hop: 6400*[0]
-#     Beta_step = torch.concat([torch.unsqueeze(Beta_hop, 2), Beta_hop1], 2) # 6400*[0]*(1+[1]/[0])
-#
-#     return torch.transpose(fea_hop_mean_att), Beta_step  #L10*6400 = 42*6400; 6400*[0]*(1+[1]/[0])
 
 def minmax_normalization_tensor(tensor):
     # tensor: n_node, n_steps, n_dim
@@ -930,7 +639,7 @@ def generate_topo(Graphs, dim_topo, prob_c, step_K):
     P_T = np.zeros((n_node,n_time,n_node))
 
     for t in range(n_time):
-        print(t)
+        print('time: ', t)
         Gt = Graphs[t,:,:]
         Gt = Gt + np.eye(n_node)
         #Dt = np.diag(np.sum(Gt, axis=1))
@@ -995,16 +704,17 @@ def gumbel_softmax_sample(adj, shape, logits, temperature, istrain=True):
     # torch.where(istrain, lambda: math.log(logits.values.type(torch.float64)) + r,
     #              lambda: math.log(logits.values.type(torch.float64)))
     values /= temperature
-    y = torch.sparse_coo_tensor(adj.indices, values, shape)
+    print(values, type(values))
+    y = torch.sparse_coo_tensor(adj.coalesce().indices, values, shape)
     return torch.sparse.softmax(y)
 
 
 if __name__ == '__main__':
-    filedpath = '/.../Data'
-    filename  = '/brain/Brain_5000nodes.npz'
-    file      = np.load(filedpath+filename)
+    filedpath = '/Users/norahc/Downloads/Ada-Code-Data-ICDM2019/Data/brain/Brain_5000nodes.npz'
+    file      = np.load(filedpath)
 
     Features  = file['attmats'] #(n_node, n_time, att_dim)
+    print(Features.shape)
     f = rearrange(Features, 'b h w -> b (h w)')
     Labels    = file['labels']  #(n_node, num_classes)
     Graphs    = file['adjs']    #(n_time, n_node, n_node)
@@ -1094,23 +804,31 @@ if __name__ == '__main__':
         adj_tensor = np.ones((n_steps, n_node, n_sample), dtype=np.int32)
 
         for i in range(n_steps):
-            adj_tensor[i, :, :] = construct_adj(Graphs[i], n_sample)
+            adj = construct_adj(Graphs[i], 240)
+            print('former adj', adj.shape)
 
             # denoise
-            adj = sparse.csr_matrix(adj_tensor[i, :, :])
+            # adj = sparse.csr_matrix(adj)
             if not sparse.isspmatrix_coo(adj):
-                adj = adj.tocoo()
+                adj = sparse.coo_matrix(adj)
             adj = adj.astype(np.float64)
-            print(adj.shape)
+            print(type(adj))
             indices = np.vstack(
-                (adj.row, adj.col)).transpose()  # This is where I made a mistake, I used (adj.row, adj.col) instead
+                (adj.row, adj.col))
             shape = adj.shape
-            adj = (indices, adj.data, adj.shape)
-            adj = torch.sparse_coo_tensor(*adj).type(torch.float32)
-
-            f1 = torch.gather(f, adj.indices[:, 0])
-            f2 = torch.gather(f, adj.indices[:, 1])
-            auv = torch.unsqueeze(adj.values, -1)
+                # adj = (indices, adj.data, adj.shape)
+            print('indices: ', indices, type(indices), indices.shape)
+            print('data: ', adj.data, type(adj.data), len(adj.data))
+            print('shape: ', adj.shape, type(adj.shape))
+            adj = torch.sparse_coo_tensor(torch.tensor(indices, dtype=torch.int64), adj.data, adj.shape).type(torch.float32)
+            print(f.shape)
+            indice1 = torch.tensor(indices[1, :], dtype=torch.int64)
+            print('i1: ', indice1.shape)
+            indice0 = torch.tensor(indices[0, :], dtype=torch.int64)
+            print('i2: ', indice0.shape)
+            f1 = torch.gather(torch.Tensor(f), 0, indice1)
+            f2 = torch.gather(torch.Tensor(f), 0, indice0)
+            auv = torch.unsqueeze(adj.data, -1)
             auv = auv.type(torch.float64)
             temp = torch.concat([f1, f2, auv], -1)
             print('temp shape: ', temp.shape)
@@ -1118,7 +836,7 @@ if __name__ == '__main__':
             mlp3 = MLP_3(in_features)
             temp = mlp3(temp)
             z = torch.reshape(temp, [-1])
-            z_matrix = torch.sparse_coo_tensor(adj.indices, z, shape)
+            z_matrix = torch.sparse_coo_tensor(indices, z, shape)
             pi = torch.sparse.softmax(z_matrix)
 
             y = gumbel_softmax_sample(adj, shape, pi, 1, True)
@@ -1229,14 +947,3 @@ if __name__ == '__main__':
             val_loss = loss_op + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
 
             val_losses.append(val_loss)
-
-
-
-
-
-
-
-
-
-
-
