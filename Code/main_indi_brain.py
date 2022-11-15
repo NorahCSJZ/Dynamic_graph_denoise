@@ -33,7 +33,7 @@ class Spatial_Attention_0(nn.Module):
         super(Spatial_Attention_0, self).__init__()
         self.V1_h0 = nn.Parameter(torch.empty(size=(L10, L11), dtype=torch.float64))
         nn.init.trunc_normal_(self.V1_h0.data, mean=-0.1, std=0.1)
-        self.w1_h0 = nn.Parameter(torch.empty(size=2*L10, dtype=torch.float64))
+        self.w1_h0 = nn.Parameter(torch.empty(size=(2*L10, 1), dtype=torch.float64))
         nn.init.trunc_normal_(self.w1_h0.data, mean=-0.1, std=0.1)
 
         self.softmax = nn.Softmax(dim=0)
@@ -58,8 +58,7 @@ class Spatial_Attention_1(nn.Module):
         super(Spatial_Attention_1, self).__init__()
         self.V1_h1 = nn.Parameter(torch.empty(size=(L11, n_dim), dtype=torch.float64))
         nn.init.trunc_normal_(self.V1_h1.data, mean=-0.1, std=0.1)
-
-        self.w1_h1 = nn.Parameter(torch.empty(2*L11, dtype=torch.float64))
+        self.w1_h1 = nn.Parameter(torch.empty(size=(2*L11, 1), dtype=torch.float64))
         nn.init.trunc_normal_(self.w1_h1.data, mean=-0.1, std=0.1)
 
         self.softmax = nn.Softmax(dim=0)
@@ -98,15 +97,13 @@ class Aggregate_Att_Mean(nn.Module):
         # gather neighbors at hop-1
         samples_temp = torch.reshape(self.samples[:, -sup_sizes[2]:],
                                      [-1, sup_sizes[1], dim_temp])  # shape: 6400*[0]*([1]/[0])
-        fea_mat_samples_temp = torch.select(x,
-                                            samples_temp)  # shape: 6400*[0]*([1]/[0])*42 -- torch.nn.Embeddings
+        fea_mat_samples_temp = x[samples_temp.numpy()]  # shape: 6400*[0]*([1]/[0])*42 -- torch.nn.Embeddings
 
         # gather target nodes for hop-1 and replicate attributes
         samples_temp_t = self.samples[:, -(sup_sizes[1] + sup_sizes[2]):-sup_sizes[2]]  # shape: 6400*[0]
         target_temp = torch.unsqueeze(samples_temp_t, 2)  # 6400*[0]*1
         target_temp = torch.tile(target_temp, [1, 1, dim_temp])  # 6400*[0]*([1]/[0])
-        fea_mat_samples_temp_t = torch.select(x,
-                                              target_temp)  # shape: 6400*[0]*([1]/[0])*42  -- torch.nn.Embeddings
+        fea_mat_samples_temp_t = x[target_temp.numpy()]  # shape: 6400*[0]*([1]/[0])*42  -- torch.nn.Embeddings
 
         # learn attention for hop-1
         fea_tar_samp = torch.concat([fea_mat_samples_temp_t, fea_mat_samples_temp], 3)  # shape: 6400*[0]*([1]/[0])*84
@@ -214,26 +211,28 @@ class GRU_neighbor(nn.Module):
 
         self.saps_idx = saps_idx
         self.sup_sizes = sup_sizes
-        self.features = Fea
+        self.features = torch.tensor(Fea)
         self.n_h_units = n_h_units
         self.aggregate_att_mean = Aggregate_Att_Mean(self.saps_idx[i, :, :], self.sup_sizes[i])
 
     def forward(self, x):
         T = self.features.shape[1]  # T = 50
         n_dim = self.features.shape[2]  # n_dim = 42
-        x = x.type(torch.int32)
-        X = torch.select(self.features, x)
+        print(x, x.shape, type(x))
+        x = torch.LongTensor(x)
+        print(self.features.shape)
+        X = self.features[x]
         for i in range(T):
             xt_temp = X[:, i, :]  # 6400*42
-            xt = torch.transpose(xt_temp)  # 42*6400
+            xt = torch.transpose(xt_temp, dim0=0, dim1=1)  # 42*6400
 
             # shapes: 10000*42, 6400*(1+[0]+[1]), [[0],[1]], 6400
             xnt, Beta_step = self.aggregate_att_mean(self.features[:, i, :])  # shape: 42*6400; 6400*[0]*(1+[1]/[0])
             if i == 0:
                 rt2_temp = torch.matmul(self.Wr2_2, torch.concat([xt, xnt], 0))  # (42*84)*((42+42)*6400)=42*6400
-                rt2 = torch.transpose(F.sigmoid(torch.transpose(rt2_temp) + self.br2))
+                rt2 = torch.transpose(F.sigmoid(torch.transpose(rt2_temp) + self.br2), dim0=0, dim1=1)
                 ht_temp = torch.matmul(self.Wh_2, torch.concat([xt, torch.multiply(rt2, xnt)], 0))  # (20*84)*(84*6400)=20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp) + self.bh))  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
                 ht = ht_tilde
                 hp = ht  # 20*6400
                 h_list_tensor = torch.unsqueeze(hp, 1)  # 20*1*6400
@@ -247,12 +246,12 @@ class GRU_neighbor(nn.Module):
                 bzr = torch.concat([self.bz, self.br1, self.br2], 0)  # (20+20+42)
 
                 zr_temp = torch.matmul(Wzr, torch.concat([hp, xt, xnt], 0))  # (82*104)*((20+42+42)*6400)=82*6400
-                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp) + bzr))  # (20+20+42)*6400: zt, rt1, rt2
+                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20+42)*6400: zt, rt1, rt2
 
                 rt1 = zr[self.n_h_units:self.n_h_units * 2, :]  # 20*6400
                 rt2 = zr[self.n_h_units * 2:self.n_h_units * 2 + n_dim, :]  # 42*6400
                 ht_temp = torch.matmul(Wh, torch.concat([torch.multiply(rt1, hp), xt, torch.multiply(rt2, xnt)], 0))  # 20*6400
-                ht_tilde = torch.transpose(torch.tanh(torch.transpose(ht_temp) + self.bh))  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(torch.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
 
                 zt = zr[0:self.n_h_units, :]  # 20*6400
                 zt_neg = 1.0 - zt
@@ -303,13 +302,13 @@ class GRU_Topology(nn.Module):
         for i in range(T):
             # print("index i in LSTM:", i)
             xt_temp = X[:, i, :]  # 6400*42
-            xt = torch.transpose(xt_temp)  # 42*6400
+            xt = torch.transpose(xt_temp, dim0=0, dim1=1)  # 42*6400
 
             if i == 0:
                 # print(Wh_2_tp)
                 # print(xt)
                 ht_temp = torch.matmul(self.Wh_2_tp, xt)  # (20*42)*(42*6400)=20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp) + self.bh_tp))  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
                 ht = ht_tilde
 
                 hp = ht  # 20*6400
@@ -322,11 +321,11 @@ class GRU_Topology(nn.Module):
                 bzr = torch.concat([self.bz_tp, self.br1_tp], 0)  # (20+20)
 
                 zr_temp = torch.matmul(Wzr, torch.concat([hp, xt], 0))  # (40*62)*((20+42)*6400)=40*6400
-                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp) + bzr))  # (20+20)*6400: zt, rt1
+                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20)*6400: zt, rt1
 
                 rt1 = zr[self.n_h_units:self.n_h_units * 2, :]  # 20*6400
                 ht_temp = torch.matmul(Wh, torch.concat([torch.multiply(rt1, hp), xt], 0))  # 20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp) + self.bh_tp))  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
 
                 zt = zr[0:self.n_h_units, :]  # 20*6400
                 zt_neg = 1.0 - zt
@@ -353,7 +352,7 @@ class Temporal_Attention(nn.Module):
 
     def forward(self, x):
         # x: h_list_tensor
-        x = torch.einsum('ij,jkl->ikl', self.V, torch.transpose(x, (2, 1, 0)))
+        x = torch.einsum('ij,jkl->ikl', self.V, torch.permute(x, (2, 1, 0)))
         x = self.tanh(x)
         x = torch.einsum('ij,jkl->ikl', self.W, x)
         x = self.softmax(x)
@@ -412,7 +411,7 @@ class Model(nn.Module):
         self.mlp1 = MLP_1()
         self.tem_attention = Temporal_Attention()
 
-    def add_parameter(self,samples_idx_batch, support_sizes_batch):
+    def add_parameter(self, samples_idx_batch, support_sizes_batch):
         self.samples_idx_batch = samples_idx_batch
         self.support_sizes_batch = support_sizes_batch
         self.gru_neighbor = GRU_neighbor(self.Fea, self.samples_idx_batch, self.support_sizes_batch,
@@ -591,10 +590,15 @@ def sample_tf(inputs, n_layers, sample_sizes, adj_tensor, n_steps):
             support_size *= sample_sizes[i]
             support_sizes.append(support_size)
             samples = samples.type(torch.int32)
-            neighs = torch.select(adj_mat, samples)  # shape: samples*n_sample
-            random.shuffle(torch.transpose(neighs).numpy())  # shuffle columns
+            samples = samples.detach().numpy()
+            print(adj_mat.shape, samples.shape)
+            neighs = adj_mat[samples]  # shape: samples*n_sample
+            random.shuffle(torch.transpose(neighs, dim0=0, dim1=1).numpy())  # shuffle columns
 
             samples = torch.reshape(neighs, [-1])
+            print('sample: ', samples_frame.shape)
+            print('neigh: ', neighs.shape)
+            print('support: ', support_sizes[i])
             samples_frame = torch.concat([samples_frame, torch.reshape(neighs, [-1, support_sizes[i]])],
                                          1)  # shape: inputs*support_sizes
 
@@ -693,20 +697,21 @@ def reduce_dim(topo_orgi, dim_topo):
 def sample_gumbel(shape):
         """Sample from Gumbel(0, 1)"""
         U = torch.rand(shape, dtype=torch.float64)
-        return -torch.log(torch.log(U + eps) + eps)
+        return -torch.log(-torch.log(U + eps) + eps)
 
 
 def gumbel_softmax_sample(adj, shape, logits, temperature, istrain=True):
     """ Draw a sample from the Gumbel-Softmax distribution"""
-    r = sample_gumbel(logits.values.shape)
+    v = logits.coalesce().values()
+    r = sample_gumbel(v.shape[0])
     r = r.type(torch.float64)
-    values = lambda: torch.log(logits.values.type(torch.float64)) + r if istrain else lambda: torch.log(logits.values.type(torch.float64))
+    values = torch.log(v) + r if istrain else torch.log(v)
     # torch.where(istrain, lambda: math.log(logits.values.type(torch.float64)) + r,
     #              lambda: math.log(logits.values.type(torch.float64)))
+    # print('values: ', values)
     values /= temperature
-    print(values, type(values))
-    y = torch.sparse_coo_tensor(adj.coalesce().indices, values, shape)
-    return torch.sparse.softmax(y)
+    y = torch.sparse_coo_tensor(adj.coalesce().indices(), values, shape)
+    return torch.sparse.softmax(y, dim=1)
 
 
 if __name__ == '__main__':
@@ -725,7 +730,7 @@ if __name__ == '__main__':
     dim_redu  = 5000 # should be set to the same size as 'att_dim'
     n_hidden_units = 10
     n_hop = 2
-    n_sample = 4
+    n_sample = 5
     sample_sizes = [n_sample, n_sample]
     n_nbor = 40
 
@@ -733,7 +738,7 @@ if __name__ == '__main__':
     num_classes = 10
     tmp_dim = num_classes
 
-    batch_size = 3000
+    batch_size = 8
     # learning rate
     lr1 = 0.001
     lr2 = 0.0001
@@ -804,53 +809,71 @@ if __name__ == '__main__':
         adj_tensor = np.ones((n_steps, n_node, n_sample), dtype=np.int32)
 
         for i in range(n_steps):
-            adj = construct_adj(Graphs[i], 240)
-            print('former adj', adj.shape)
+            adj = construct_adj(Graphs[i], n_sample)
+            # print('former adj', adj.shape)
 
             # denoise
             # adj = sparse.csr_matrix(adj)
             if not sparse.isspmatrix_coo(adj):
-                adj = sparse.coo_matrix(adj)
-            adj = adj.astype(np.float64)
-            print(type(adj))
-            indices = np.vstack(
-                (adj.row, adj.col))
+                # adj = sparse.coo_matrix(adj)
+                adj = adj.astype(np.float64)
+                adj_numpy = adj
+                adj = torch.from_numpy(adj)
+                adj = adj.to_sparse()
+
+            # print(type(adj))
+            # indices = np.vstack(
+            #     (adj.row, adj.col))
+            # indices = adj.indices
             shape = adj.shape
-                # adj = (indices, adj.data, adj.shape)
-            print('indices: ', indices, type(indices), indices.shape)
-            print('data: ', adj.data, type(adj.data), len(adj.data))
-            print('shape: ', adj.shape, type(adj.shape))
-            adj = torch.sparse_coo_tensor(torch.tensor(indices, dtype=torch.int64), adj.data, adj.shape).type(torch.float32)
-            print(f.shape)
-            indice1 = torch.tensor(indices[1, :], dtype=torch.int64)
-            print('i1: ', indice1.shape)
-            indice0 = torch.tensor(indices[0, :], dtype=torch.int64)
-            print('i2: ', indice0.shape)
-            f1 = torch.gather(torch.Tensor(f), 0, indice1)
-            f2 = torch.gather(torch.Tensor(f), 0, indice0)
-            auv = torch.unsqueeze(adj.data, -1)
-            auv = auv.type(torch.float64)
-            temp = torch.concat([f1, f2, auv], -1)
-            print('temp shape: ', temp.shape)
+            # adj = (indices, adj.data, adj.shape)
+            adj = adj.coalesce()
+            # print('indices: ', adj.indices())
+            # print('data: ', adj.values(), type(adj.values()), len(adj.values()))
+            # print('shape: ', adj.size(), type(adj.size()))
+            # adj = torch.sparse_coo_tensor(adj.indices(), adj.values(), adj.size()).type(torch.float32)
+            # print(f.shape)
+            adj_detach = adj.clone().detach()
+            indice1 = torch.tensor(adj_detach.indices()[1, :], dtype=torch.int64)
+            # print('i1: ', indice1.shape)
+            indice0 = torch.tensor(adj_detach.indices()[0, :], dtype=torch.int64).detach()
+            # print('i2: ', indice0.shape)
+            f1 = torch.FloatTensor(f)[indice1]
+            # print(f1.shape)
+            f2 = torch.FloatTensor(f)[indice0]
+            adj_dense = adj.values()
+            # print("stop1")
+            # print(adj_dense.shape)
+            auv = torch.unsqueeze(adj_dense, -1)
+            # print("stop2")
+            auv = adj_dense.type(torch.float64)
+            auv = torch.unsqueeze(auv, -1)
+            # print("f1 shape: ", f1.shape)
+            # print("f2 shape: ", f2.shape)
+            # print("auv shape: ", auv.shape)
+            temp = torch.cat((f1, f2, auv), -1)
+            # print('temp shape: ', temp.shape)
             in_features = temp.shape[-1]
             mlp3 = MLP_3(in_features)
             temp = mlp3(temp)
             z = torch.reshape(temp, [-1])
-            z_matrix = torch.sparse_coo_tensor(indices, z, shape)
-            pi = torch.sparse.softmax(z_matrix)
+            z_matrix = torch.sparse_coo_tensor(adj.indices(), z, shape)
+            pi = torch.sparse.softmax(z_matrix, dim=1)
 
             y = gumbel_softmax_sample(adj, shape, pi, 1, True)
             y_dense = y.to_dense()
-            print("dense shape:", y_dense.shape)
+            # print("dense shape:", y_dense.shape)
 
             top_k_v, top_k_i = torch.topk(y_dense, k)
-            kth = torch.min(top_k_v, -1) + eps  # N,
+            input_min, min_indices  = torch.min(top_k_v, -1)
+            # print(input_min)
+            kth = torch.add(input_min, eps)  # N,
 
             kth = torch.unsqueeze(kth, -1)
             kth = torch.tile(kth, [1, n_sample])  # N,N
 
-            print("y_dense: ", y_dense.shape)
-            print("kth: ", kth.shape)
+            # print("y_dense: ", y_dense.shape)
+            # print("kth: ", kth.shape)
             mask2 = torch.ge(y_dense, kth)
             mask2 = mask2.type(torch.float64)
             dense_support = mask2
@@ -859,13 +882,16 @@ if __name__ == '__main__':
             dense_support = dense_support + self_edge
 
             rowsum = torch.sum(dense_support, -1) + 1e-6  # to avoid NaN
+            # print('rowsum: ', rowsum.shape)
 
             d_inv_sqrt = torch.reshape(torch.pow(rowsum, -0.5), [-1])  # D^-0.5
+            # print(d_inv_sqrt.shape)
             d_mat_inv_sqer = torch.diag(d_inv_sqrt)
             ad = torch.matmul(d_mat_inv_sqer, dense_support)
-            print(d_mat_inv_sqer.shape, ad.shape)
+            # print(d_mat_inv_sqer.shape, ad.shape)
             dadt = torch.matmul(d_mat_inv_sqer, ad)
-
+            # print(dadt.shape)
+            dadt = dadt.detach().numpy()
             array = np.array(dadt)
 
             adj_tensor[i, :, :] = array
@@ -947,3 +973,14 @@ if __name__ == '__main__':
             val_loss = loss_op + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
 
             val_losses.append(val_loss)
+
+
+
+
+
+
+
+
+
+
+
