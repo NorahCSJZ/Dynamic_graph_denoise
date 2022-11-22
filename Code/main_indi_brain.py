@@ -26,6 +26,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from scipy import sparse
 from einops import rearrange
+import torch.nn.functional as F
 
 
 class Spatial_Attention_0(nn.Module):
@@ -35,6 +36,7 @@ class Spatial_Attention_0(nn.Module):
         nn.init.trunc_normal_(self.V1_h0.data, mean=-0.1, std=0.1)
         self.w1_h0 = nn.Parameter(torch.empty(size=(2*L10, 1), dtype=torch.float64))
         nn.init.trunc_normal_(self.w1_h0.data, mean=-0.1, std=0.1)
+        self.w1_h0.data = torch.squeeze(self.w1_h0.data)
 
         self.softmax = nn.Softmax(dim=0)
         self.leaky_relu = nn.LeakyReLU()
@@ -60,7 +62,7 @@ class Spatial_Attention_1(nn.Module):
         nn.init.trunc_normal_(self.V1_h1.data, mean=-0.1, std=0.1)
         self.w1_h1 = nn.Parameter(torch.empty(size=(2*L11, 1), dtype=torch.float64))
         nn.init.trunc_normal_(self.w1_h1.data, mean=-0.1, std=0.1)
-
+        self.w1_h1.data = torch.squeeze(self.w1_h1.data)
         self.softmax = nn.Softmax(dim=0)
         self.leaky_relu = nn.LeakyReLU()
 
@@ -79,6 +81,8 @@ class Aggregate_Att_Mean(nn.Module):
         self.spatial_att_mean_1 = Spatial_Attention_1()
         self.spatial_att_mean_0 = Spatial_Attention_0()
 
+        self.V1_h0 = nn.Parameter(torch.empty(size=(L10, L11), dtype=torch.float64))
+        nn.init.trunc_normal_(self.V1_h0.data, mean=-0.1, std=0.1)
         self.V1_h1 = nn.Parameter(torch.empty(size=(L11, n_dim), dtype=torch.float64))
         nn.init.trunc_normal_(self.V1_h1.data, mean=-0.1, std=0.1)
         self.weights_hops_1 = nn.Parameter(torch.empty(size=(dim_hop0, dim_hop1), dtype=torch.float64))
@@ -97,13 +101,27 @@ class Aggregate_Att_Mean(nn.Module):
         # gather neighbors at hop-1
         samples_temp = torch.reshape(self.samples[:, -sup_sizes[2]:],
                                      [-1, sup_sizes[1], dim_temp])  # shape: 6400*[0]*([1]/[0])
-        fea_mat_samples_temp = x[samples_temp.numpy()]  # shape: 6400*[0]*([1]/[0])*42 -- torch.nn.Embeddings
+        # shape: 6400*[0]*([1]/[0])*42 -- torch.nn.Embeddings
+        st1, st2, st3 = samples_temp.shape
+        fea_mat_list = []
+        for q in range(samples_temp.shape[0]):
+            fea_mat_samples_temp_q = torch.cat([torch.index_select(x, dim=0, index=samples_temp[q, k, :]) for k in range(samples_temp.shape[1])]).reshape(samples_temp.shape[1], samples_temp.shape[2], -1)
+            fea_mat_list.append(fea_mat_samples_temp_q)
+        fea_mat_samples_temp = torch.cat(fea_mat_list).reshape(st1, st2, st3, -1)
 
         # gather target nodes for hop-1 and replicate attributes
         samples_temp_t = self.samples[:, -(sup_sizes[1] + sup_sizes[2]):-sup_sizes[2]]  # shape: 6400*[0]
         target_temp = torch.unsqueeze(samples_temp_t, 2)  # 6400*[0]*1
         target_temp = torch.tile(target_temp, [1, 1, dim_temp])  # 6400*[0]*([1]/[0])
-        fea_mat_samples_temp_t = x[target_temp.numpy()]  # shape: 6400*[0]*([1]/[0])*42  -- torch.nn.Embeddings
+        # print('target_temp', target_temp.shape)
+        # print('x: ', x.shape)
+        t1, t2, t3 = target_temp.shape
+        tar_mat_list = []
+        for q in range(t1):
+            tar_mat_samples_temp_q = torch.cat([torch.index_select(x, dim=0, index=target_temp[q, k, :]) for k in
+                                                range(t2)]).reshape(t2, t3, -1)
+            tar_mat_list.append(tar_mat_samples_temp_q)
+        fea_mat_samples_temp_t = torch.cat(tar_mat_list).reshape(t1, t2, t3, -1) # shape: 6400*[0]*([1]/[0])*42  -- torch.nn.Embeddings
 
         # learn attention for hop-1
         fea_tar_samp = torch.concat([fea_mat_samples_temp_t, fea_mat_samples_temp], 3)  # shape: 6400*[0]*([1]/[0])*84
@@ -111,7 +129,7 @@ class Aggregate_Att_Mean(nn.Module):
         Beta_hop1 = self.spatial_att_mean_1(fea_tar_samp)
 
         temp_aam_0 = torch.einsum('ij,jklm->iklm', self.V1_h1,
-                               torch.transpose(fea_mat_samples_temp,(3, 2, 1, 0)))  # shape: L11*([1]/[0])*[0]*6400
+                               torch.permute(fea_mat_samples_temp, (3, 2, 1, 0)))  # shape: L11*([1]/[0])*[0]*6400
         temp_aam_1 = torch.matmul(torch.unsqueeze(Beta_hop1, 2),
                                torch.permute(temp_aam_0, (3, 2, 1, 0)))  # shape: 6400*[0]*1*L11 ???
         fea_hop_mean_att = torch.squeeze(temp_aam_1, dim=2)  # shape: 6400*[0]*L11
@@ -129,15 +147,19 @@ class Aggregate_Att_Mean(nn.Module):
         dim_temp = np.int32(sup_sizes[1])
         # gather neighbors at hop-0
         samples_temp = self.samples[:, -(sup_sizes[1] + sup_sizes[2]):-sup_sizes[2]]  # shape: 6400*[0]
-        fea_mat_samples_temp = torch.select(x, samples_temp)  # shape: 6400*[0]*42
+        # print('test: ', x.shape, samples_temp.shape)
+        st0, st1 = samples_temp.shape
+        fea_mat_samples_temp = torch.cat([torch.index_select(x, dim=0, index=samples_temp[q, :]) for q in range(st0)]).reshape(st0, st1, -1)  # shape: 6400*[0]*42
         # gather target nodes for hop-0 and replicate attributes
         samples_temp_t = self.samples[:, 0]  # shape: 6400*1
         target_temp = torch.tile(torch.unsqueeze(samples_temp_t, 1), [1, dim_temp])  # 6400*[0]
-        fea_mat_samples_temp_t = torch.select(x, target_temp)  # shape: 6400*[0]*42
+        t0, t1 = target_temp.shape
+        fea_mat_samples_temp_t = torch.cat(
+            [torch.index_select(x, dim=0, index=target_temp[q, :]) for q in range(t0)]).reshape(t0, t1, -1) # shape: 6400*[0]*42
         # learn attention for hop-0
         fea_tar_samp = torch.concat([fea_mat_samples_temp_t, fea_mat_samples_temp], 2)  # shape: 6400*[0]*84
 
-        Beta_hop0 = self.spatial_attention_1(torch.unsqueeze(fea_tar_samp, 1))  # shape: 6400*1*[0]
+        Beta_hop0 = self.spatial_att_mean_1(torch.unsqueeze(fea_tar_samp, 1))  # shape: 6400*1*[0]
         # calculate neighbor representation
         #   V1_h1: L11*n_dim
         #   fea_mat_samples_temp: 6400*[0]*42
@@ -148,8 +170,8 @@ class Aggregate_Att_Mean(nn.Module):
 
         # concatenate and transform
         fea_mat_samples_temp_t_emb = torch.einsum('ij,jk->ik', self.V1_h1,
-                                               torch.transpose(fea_mat_samples_temp_t[:, 0, :], (1, 0)))  # L11*6400
-        con_hop1 = torch.concat([fea_mat_samples_temp_t_emb, torch.transpose(fea_hop_mean_att, (1, 0))],
+                                               torch.permute(fea_mat_samples_temp_t[:, 0, :], (1, 0)))  # L11*6400
+        con_hop1 = torch.concat([fea_mat_samples_temp_t_emb, torch.permute(fea_hop_mean_att, (1, 0))],
                              0)  # shape: (L11*2)*6400, dim_hop1=L11*2
         hop0 = self.sigmoid(torch.einsum('ij,jk->ik', self.weights_hops_1,
                                     con_hop1))  # shape: (dim_hop0,dim_hop1)*((L11*2)*6400)=dim_hop0*6400
@@ -161,7 +183,7 @@ class Aggregate_Att_Mean(nn.Module):
         target_temp = torch.tile(target_temp, [1, dim_temp, 1])  # dim_hop0*[0]*6400
         # learn attention
         fea_tar_samp = torch.concat([target_temp, hop1], 0)  # shape: (2*dim_hop0)*[0]*6400
-        Beta_hop = self.spatial_attention_0(fea_tar_samp)  # shape: 6400*[0]
+        Beta_hop = self.spatial_att_mean_0(fea_tar_samp)  # shape: 6400*[0]
 
         # calculate neighbor representation
         #   V1_h0: L10*dim_hop0
@@ -176,7 +198,7 @@ class Aggregate_Att_Mean(nn.Module):
         # Beta_hop: 6400*[0]
         Beta_step = torch.concat([torch.unsqueeze(Beta_hop, 2), Beta_hop1], 2)  # 6400*[0]*(1+[1]/[0])
 
-        return torch.transpose(fea_hop_mean_att), Beta_step  # L10*6400 = 42*6400; 6400*[0]*(1+[1]/[0])
+        return fea_hop_mean_att.t(), Beta_step  # L10*6400 = 42*6400; 6400*[0]*(1+[1]/[0])
 
 
 class GRU_neighbor(nn.Module):
@@ -206,7 +228,7 @@ class GRU_neighbor(nn.Module):
         nn.init.trunc_normal_(self.br1.data)
         self.br2 = nn.Parameter(torch.zeros(n_dim, dtype=torch.float64))
         nn.init.trunc_normal_(self.br2.data)
-        self.bh = nn.Parameter(torch.zeros(n_dim, dtype=torch.float64))
+        self.bh = nn.Parameter(torch.zeros(M, dtype=torch.float64))
         nn.init.trunc_normal_(self.bh.data)
 
         self.saps_idx = saps_idx
@@ -218,9 +240,8 @@ class GRU_neighbor(nn.Module):
     def forward(self, x):
         T = self.features.shape[1]  # T = 50
         n_dim = self.features.shape[2]  # n_dim = 42
-        print(x, x.shape, type(x))
         x = torch.LongTensor(x)
-        print(self.features.shape)
+        # print(self.features.shape)
         X = self.features[x]
         for i in range(T):
             xt_temp = X[:, i, :]  # 6400*42
@@ -230,9 +251,10 @@ class GRU_neighbor(nn.Module):
             xnt, Beta_step = self.aggregate_att_mean(self.features[:, i, :])  # shape: 42*6400; 6400*[0]*(1+[1]/[0])
             if i == 0:
                 rt2_temp = torch.matmul(self.Wr2_2, torch.concat([xt, xnt], 0))  # (42*84)*((42+42)*6400)=42*6400
-                rt2 = torch.transpose(F.sigmoid(torch.transpose(rt2_temp) + self.br2), dim0=0, dim1=1)
+                rt2 = torch.transpose(torch.sigmoid(torch.transpose(rt2_temp, dim0=0, dim1=1) + self.br2), dim0=0, dim1=1)
                 ht_temp = torch.matmul(self.Wh_2, torch.concat([xt, torch.multiply(rt2, xnt)], 0))  # (20*84)*(84*6400)=20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
+                result = torch.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh)
+                ht_tilde = torch.transpose(torch.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
                 ht = ht_tilde
                 hp = ht  # 20*6400
                 h_list_tensor = torch.unsqueeze(hp, 1)  # 20*1*6400
@@ -246,7 +268,7 @@ class GRU_neighbor(nn.Module):
                 bzr = torch.concat([self.bz, self.br1, self.br2], 0)  # (20+20+42)
 
                 zr_temp = torch.matmul(Wzr, torch.concat([hp, xt, xnt], 0))  # (82*104)*((20+42+42)*6400)=82*6400
-                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20+42)*6400: zt, rt1, rt2
+                zr = torch.transpose(torch.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20+42)*6400: zt, rt1, rt2
 
                 rt1 = zr[self.n_h_units:self.n_h_units * 2, :]  # 20*6400
                 rt2 = zr[self.n_h_units * 2:self.n_h_units * 2 + n_dim, :]  # 42*6400
@@ -297,18 +319,19 @@ class GRU_Topology(nn.Module):
         T = self.topo.shape[1]  # T = 50
         n_dim = self.topo.shape[2]  # n_dim = 42
         x = x.type(torch.int32)
-        X = torch.select(self.topo, x)  # shape: 6400*50*42
+        X = self.topo[x, :, :]  # shape: 6400*50*42
 
         for i in range(T):
             # print("index i in LSTM:", i)
             xt_temp = X[:, i, :]  # 6400*42
+            xt_temp = torch.tensor(xt_temp)
             xt = torch.transpose(xt_temp, dim0=0, dim1=1)  # 42*6400
 
             if i == 0:
                 # print(Wh_2_tp)
                 # print(xt)
                 ht_temp = torch.matmul(self.Wh_2_tp, xt)  # (20*42)*(42*6400)=20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(torch.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
                 ht = ht_tilde
 
                 hp = ht  # 20*6400
@@ -321,11 +344,11 @@ class GRU_Topology(nn.Module):
                 bzr = torch.concat([self.bz_tp, self.br1_tp], 0)  # (20+20)
 
                 zr_temp = torch.matmul(Wzr, torch.concat([hp, xt], 0))  # (40*62)*((20+42)*6400)=40*6400
-                zr = torch.transpose(F.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20)*6400: zt, rt1
+                zr = torch.transpose(torch.sigmoid(torch.transpose(zr_temp, dim0=0, dim1=1) + bzr), dim0=0, dim1=1)  # (20+20)*6400: zt, rt1
 
                 rt1 = zr[self.n_h_units:self.n_h_units * 2, :]  # 20*6400
                 ht_temp = torch.matmul(Wh, torch.concat([torch.multiply(rt1, hp), xt], 0))  # 20*6400
-                ht_tilde = torch.transpose(F.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
+                ht_tilde = torch.transpose(torch.tanh(torch.transpose(ht_temp, dim0=0, dim1=1) + self.bh_tp), dim0=0, dim1=1)  # 6400*20 + 20 -> 20*6400
 
                 zt = zr[0:self.n_h_units, :]  # 20*6400
                 zt_neg = 1.0 - zt
@@ -365,8 +388,8 @@ class Topo_Attention(nn.Module):
         super(Topo_Attention, self).__init__()
         self.w_tp = nn.Parameter(torch.empty(size=(1, L_tp), dtype=torch.float64))
         nn.init.trunc_normal_(self.w_tp.data, mean=-0.1, std=0.1)
-        self.v_tp = nn.Parameter(torch.empty(size=(L_tp, M), dtype=torch.float64))
-        nn.init.trunc_normal_(self.v_tp.data, mean=-0.1, std=0.1)
+        self.V_tp = nn.Parameter(torch.empty(size=(L_tp, M), dtype=torch.float64))
+        nn.init.trunc_normal_(self.V_tp.data, mean=-0.1, std=0.1)
 
     def forward(self, x):
         # h_1, h_2: 6400*T*M
@@ -377,7 +400,7 @@ class Topo_Attention(nn.Module):
         for i in range(T):
             h_comb = torch.concat([torch.unsqueeze(h_1[:, i, :], 1), torch.unsqueeze(h_2[:, i, :], 1)], 1)  # 6400*2*M
 
-            temp = F.tanh(torch.einsum('ij,jkl->ikl', self.V_tp, torch.permute(h_comb, (2, 1, 0))))  # L_tp*2*6400
+            temp = torch.tanh(torch.einsum('ij,jkl->ikl', self.V_tp, torch.permute(h_comb, (2, 1, 0))))  # L_tp*2*6400
             if i == 0:
                 A = F.softmax(torch.einsum('ij,jkl->ikl', self.w_tp, temp), dim=1)  # 1*2*6400
             else:
@@ -410,6 +433,7 @@ class Model(nn.Module):
         self.topo_attention = Topo_Attention()  # topo_att_indi_attention(h_list_tensor, h_list_tensor_topo)
         self.mlp1 = MLP_1()
         self.tem_attention = Temporal_Attention()
+        self.softmax = nn.Softmax(dim=0)
 
     def add_parameter(self, samples_idx_batch, support_sizes_batch):
         self.samples_idx_batch = samples_idx_batch
@@ -422,7 +446,7 @@ class Model(nn.Module):
     def forward(self, x):
         h_list_tensor, Beta = self.gru_neighbor(x)
         h_list_tensor_topo = self.gru_topo(x)
-        Gamma = self.topo_attention(h_list_tensor, h_list_tensor_topo)
+        Gamma = self.topo_attention([h_list_tensor, h_list_tensor_topo])
         h_1_tmp = torch.multiply(torch.permute(torch.unsqueeze(Gamma[:, 0, :], 1), (0, 2, 1)),
                                  h_list_tensor)  # 6400*T*1 * 6400*T*M = 6400*T*M
         h_2_tmp = torch.multiply(torch.permute(torch.unsqueeze(Gamma[:, 1, :], 1), (0, 2, 1)),
@@ -435,8 +459,9 @@ class Model(nn.Module):
 
         temp = torch.matmul(Alpha, h_att_topo)  # 6400*r*2M
         shape = temp.shape[1] * temp.shape[2]
-        temp1 = torch.reshape(temp, [-1, shape.type(torch.int32)])
+        temp1 = torch.reshape(temp, [-1, shape])
         out = self.mlp1(temp1)
+        out = self.softmax(out)
         return out, h_list_tensor, Alpha, temp, Beta, Gamma, h_list_tensor_topo
 
 
@@ -460,11 +485,6 @@ class MLP_3(nn.Module):
         return x
 
 
-
-
-
-
-
 class MyDataset(Dataset):
     def __init__(self, data, label):
         self.data = data
@@ -474,7 +494,7 @@ class MyDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, item):
-        return self.data, self.label
+        return self.data[item], self.label[item]
 
 
 
@@ -566,13 +586,14 @@ def construct_adj(graph, n_sample):
 
     return adj
 
-def sample_tf(inputs, n_layers, sample_sizes, adj_tensor, n_steps):
+
+def sample_tf(inputs, n_layers: int, sample_sizes, adj_tensor, n_steps):
     # inputs: batch of nodes; adj_tensor: adj_mats for all time steps
     # return: 
     #   samples_tensor    : (n_steps)*inputs*(1+[0]+[1])
     #   support_sizes_list: a list of lists
-
     support_sizes_list = []
+    samples_tensor = 0
     for t in range(n_steps):
         samples = inputs
         input_temp = inputs
@@ -591,14 +612,14 @@ def sample_tf(inputs, n_layers, sample_sizes, adj_tensor, n_steps):
             support_sizes.append(support_size)
             samples = samples.type(torch.int32)
             samples = samples.detach().numpy()
-            print(adj_mat.shape, samples.shape)
+            # print(adj_mat.shape, samples.shape)
             neighs = adj_mat[samples]  # shape: samples*n_sample
             random.shuffle(torch.transpose(neighs, dim0=0, dim1=1).numpy())  # shuffle columns
 
             samples = torch.reshape(neighs, [-1])
-            print('sample: ', samples_frame.shape)
-            print('neigh: ', neighs.shape)
-            print('support: ', support_sizes[i])
+            # print('sample: ', samples_frame.shape)
+            # print('neigh: ', neighs.shape)
+            # print('support: ', support_sizes[i])
             samples_frame = torch.concat([samples_frame, torch.reshape(neighs, [-1, support_sizes[i]])],
                                          1)  # shape: inputs*support_sizes
 
@@ -615,6 +636,15 @@ def sample_tf(inputs, n_layers, sample_sizes, adj_tensor, n_steps):
 
 def normalize(v):
     return F.normalize(v, dim=1, p=2, eps=1e-12)
+
+
+def accuracy(output, labels):
+    preds = output.max(1)[1].type_as(labels)
+    print(preds)
+    correct = preds.eq(labels).double()
+    correct = correct.sum()
+    return correct / len(labels)
+
 
 def eval(y_true, y_pred):
     # both size: 6400*num_classes
@@ -633,6 +663,7 @@ def eval(y_true, y_pred):
 
 
     return accuracy, auc_mac, auc_mic, f1_mac, f1_mic
+
 
 def generate_topo(Graphs, dim_topo, prob_c, step_K):
     # Graphs: n_time*n_node*n_node
@@ -770,8 +801,11 @@ if __name__ == '__main__':
     prob_c = 0.98
     step_K = 5
     dim_topo = n_dim # dim_topo will not work
-    Topology = generate_topo(Graphs, dim_topo, prob_c, step_K) #(n_node, n_time, dim_topo)
-    Topology = meanstd_normalization_tensor(Topology)
+    # Topology = generate_topo(Graphs, dim_topo, prob_c, step_K) #(n_node, n_time, dim_topo)
+    # Topology = meanstd_normalization_tensor(Topology)
+    # torch.save(Topology, 'topo.pt')
+    # exit(0)
+    Topology = torch.load('topo.pt')
 
     # add self-loop
     for i in range(n_steps):
@@ -782,32 +816,31 @@ if __name__ == '__main__':
     scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, eta_min=0.001, T_0=20)
     train_losses = []
     val_losses = []
+    Data_idx = np.arange(n_node)
+    X_train_idx, X_test_idx, y_train, y_test = train_test_split(Data_idx, Labels, test_size=0.1)  # N_tr, N_te
+    X_train_idx, X_val_idx, y_train, y_val = train_test_split(X_train_idx, y_train, test_size=0.1)  # N_tr, N_te
+    print('x_train_idx: ', X_train_idx.shape)
+    train_dataset = MyDataset(X_train_idx, y_train)
+
+    val_dataset = MyDataset(X_val_idx, y_val)
+
+    train_loader = torch.utils.data.DataLoader(train_dataset,
+                                               batch_size=batch_size + 1,
+                                               shuffle=True,
+                                               pin_memory=True,
+                                               num_workers=1,
+                                               )
+
+    val_loader = torch.utils.data.DataLoader(val_dataset,
+                                             batch_size=batch_size + 1,
+                                             shuffle=True,
+                                             pin_memory=True,
+                                             num_workers=1,
+                                             )
+
+    # construct adjacent matrix
+    adj_tensor = np.ones((n_steps, n_node, n_sample), dtype=np.int32)
     for epoch in range(200):
-        Data_idx = np.arange(n_node)
-        X_train_idx, X_test_idx, y_train, y_test = train_test_split(Data_idx, Labels, test_size=0.1)  # N_tr, N_te
-        X_train_idx, X_val_idx, y_train, y_val = train_test_split(X_train_idx, y_train, test_size=0.1)  # N_tr, N_te
-
-        train_dataset = MyDataset(X_train_idx, y_train)
-
-        val_dataset = MyDataset(X_val_idx, y_val)
-
-        train_loader = torch.utils.data.DataLoader(train_dataset,
-                                                   batch_size=batch_size,
-                                                   shuffle=True,
-                                                   pin_memory=True,
-                                                   num_workers=1,
-                                                   )
-
-        val_loader = torch.utils.data.DataLoader(val_dataset,
-                                                 batch_size=batch_size,
-                                                 shuffle=True,
-                                                 pin_memory=True,
-                                                 num_workers=1,
-                                                 )
-
-        # construct adjacent matrix
-        adj_tensor = np.ones((n_steps, n_node, n_sample), dtype=np.int32)
-
         for i in range(n_steps):
             adj = construct_adj(Graphs[i], n_sample)
             # print('former adj', adj.shape)
@@ -833,10 +866,9 @@ if __name__ == '__main__':
             # print('shape: ', adj.size(), type(adj.size()))
             # adj = torch.sparse_coo_tensor(adj.indices(), adj.values(), adj.size()).type(torch.float32)
             # print(f.shape)
-            adj_detach = adj.clone().detach()
-            indice1 = torch.tensor(adj_detach.indices()[1, :], dtype=torch.int64)
+            indice1 = adj.clone().detach().indices()[1, :]
             # print('i1: ', indice1.shape)
-            indice0 = torch.tensor(adj_detach.indices()[0, :], dtype=torch.int64).detach()
+            indice0 = adj.clone().detach().indices()[0, :]
             # print('i2: ', indice0.shape)
             f1 = torch.FloatTensor(f)[indice1]
             # print(f1.shape)
@@ -891,20 +923,19 @@ if __name__ == '__main__':
             # print(d_mat_inv_sqer.shape, ad.shape)
             dadt = torch.matmul(d_mat_inv_sqer, ad)
             # print(dadt.shape)
-            dadt = dadt.detach().numpy()
-            array = np.array(dadt)
 
-            adj_tensor[i, :, :] = array
-
-
-        adj_tensor = torch.tensor(adj_tensor, dtype=torch.int32)
+            adj_tensor[i, :, :] = dadt.detach()
+        if type(adj_tensor) == np.ndarray:
+            adj_tensor = torch.from_numpy(adj_tensor)
         train_loader = tqdm(train_loader, file=sys.stdout)
 
         # training
+        corrects = 0
+        total = 0
         for step, data in enumerate(train_loader):
             inputs, label = data
-            samples_idx, support_sizes = sample_tf(inputs, n_hop, sample_sizes, adj_tensor,
-                                                   n_steps)  # samples_idx: (n_steps)*inputs*(1+[0]+[1])
+            samples_idx, support_sizes = sample_tf(inputs=inputs, n_layers=n_hop, sample_sizes=sample_sizes, adj_tensor=adj_tensor,
+                                                   n_steps=n_steps)  # samples_idx: (n_steps)*inputs*(1+[0]+[1])
 
             # 6400*num_classes, 6400*T*M, 6400*r*T, 6400*r*M, T*6400*[0]*(1+[1]/[0])
 
@@ -917,17 +948,20 @@ if __name__ == '__main__':
             #                                                                                           n_hidden_units,
             #                                                                                           num_stacked_layers,
             #                                                                                           tmp_dim)
-            prediction = F.softmax(logits_batch)  # softmax row by row, 6400*num_classes
+            prediction = logits_batch # softmax row by row, 6400*num_classes
+            preds = prediction.max(1)[1].type_as(label)
+            labels = label.max(1)[1]
+            correct = preds.eq(labels).double()
+            corrects += correct.sum()
+            total += len(labels)
             # L2 regularization for weights and biases
             # lambda_l2_reg = 5e-5
             reg_loss = 0
-
-
-            output1 = torch.mean(torch.norm(torch.tensor(pg)))
-
+            for p in pg:
+                reg_loss += torch.mean(torch.norm(p.data))
             lambda_reg_att = 0e-1
             reg_att_temp = torch.matmul(Alpha, torch.permute(Alpha, (0, 2, 1)))  # 6400*r*r
-            I_mat = torch.Tensor(np.eye(r), dtype=torch.float64)
+            I_mat = torch.tensor(np.eye(r), dtype=torch.float64)
             reg_att = torch.mean(torch.norm(reg_att_temp - I_mat))
 
             loss_p = F.cross_entropy(logits_batch, label)
@@ -942,7 +976,10 @@ if __name__ == '__main__':
 
             scheduler.step()
 
+        print('train_acc: ', corrects / total)
         # evaluation
+        corrects = 0
+        total = 0
         model.eval()
         for step, data in enumerate(val_loader):
             inputs, label = data
@@ -954,16 +991,21 @@ if __name__ == '__main__':
             #                                                                                           n_hidden_units,
             #                                                                                           num_stacked_layers,
             #                                                                                           tmp_dim)
-            prediction = F.softmax(logits_batch)  # softmax row by row, 6400*num_classes
+            prediction = logits_batch  # softmax row by row, 6400*num_classes
+            preds = prediction.max(1)[1].type_as(label)
+            labels = label.max(1)[1]
+            correct = preds.eq(labels).double()
+            corrects += correct.sum()
+            total += len(labels)
             # L2 regularization for weights and biases
             # lambda_l2_reg = 5e-5
             reg_loss = 0
-
-            output1 = torch.mean(torch.norm(torch.tensor(pg)))
+            for p in pg:
+                reg_loss += torch.mean(torch.norm(p.data))
 
             lambda_reg_att = 0e-1
             reg_att_temp = torch.matmul(Alpha, torch.permute(Alpha, (0, 2, 1)))  # 6400*r*r
-            I_mat = torch.Tensor(np.eye(r), dtype=torch.float64)
+            I_mat = torch.tensor(np.eye(r), dtype=torch.float64)
             reg_att = torch.mean(torch.norm(reg_att_temp - I_mat))
 
             loss_p = F.cross_entropy(logits_batch, label)
@@ -973,6 +1015,8 @@ if __name__ == '__main__':
             val_loss = loss_op + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
 
             val_losses.append(val_loss)
+
+        print('val_acc: ', corrects / total)
 
 
 
