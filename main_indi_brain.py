@@ -7,7 +7,7 @@ os.environ["CUDA_VISIBLE_DEVICES" ] = "2,3"
 # import tensorflow as tf
 import sys
 import math
-from torchsummary import summary
+from torchinfo import summary
 
 import numpy as np
 
@@ -77,7 +77,7 @@ class Spatial_Attention_1(nn.Module):
 
 
 class Aggregate_Att_Mean(nn.Module):
-    def __init__(self, samples,  sup_sizes):
+    def __init__(self):
         super(Aggregate_Att_Mean, self).__init__()
         self.spatial_att_mean_1 = Spatial_Attention_1()
         self.spatial_att_mean_0 = Spatial_Attention_0()
@@ -91,7 +91,7 @@ class Aggregate_Att_Mean(nn.Module):
 
         self.sigmoid = nn.Sigmoid()
 
-
+    def _add_parameter(self, samples, sup_sizes):
         self.samples = samples
         self.sup_sizes = sup_sizes
 
@@ -284,7 +284,11 @@ class Model(nn.Module):
         self.gru_topo = GRU_Topology(self.Topo,
                                      self.n_hidden_units)
 
+
+
     def forward(self, x):
+        if x.ndim == 2:
+            x = torch.squeeze(x)
         h_list_tensor, Beta = self.gru_neighbor(x)
         h_list_tensor_topo = self.gru_topo(x)
         Gamma = self.topo_attention([h_list_tensor, h_list_tensor_topo])
@@ -325,6 +329,7 @@ class MLP_3(nn.Module):
         x = torch.matmul(x, self.W2) + self.b2
         return x
 
+
 class GRU_neighbor(nn.Module):
     def __init__(self, Fea, saps_idx, sup_sizes, n_h_units):
         super(GRU_neighbor, self).__init__()
@@ -359,7 +364,7 @@ class GRU_neighbor(nn.Module):
         self.sup_sizes = sup_sizes
         self.features = torch.tensor(Fea)
         self.n_h_units = n_h_units
-        self.aggregate_att_mean = Aggregate_Att_Mean(self.saps_idx[i, :, :], self.sup_sizes[i])
+        self.aggregate_att_mean = Aggregate_Att_Mean()
 
     def forward(self, x):
         T = self.features.shape[1]  # T = 50
@@ -370,6 +375,7 @@ class GRU_neighbor(nn.Module):
         for i in range(T):
             xt_temp = X[:, i, :]  # 6400*42
             xt = torch.transpose(xt_temp, dim0=0, dim1=1)  # 42*6400
+            self.aggregate_att_mean._add_parameter(self.saps_idx[i, :, :], self.sup_sizes[i])
 
             # shapes: 10000*42, 6400*(1+[0]+[1]), [[0],[1]], 6400
             xnt, Beta_step = self.aggregate_att_mean(self.features[:, i, :])  # shape: 42*6400; 6400*[0]*(1+[1]/[0])
@@ -497,14 +503,12 @@ class MyDataset(Dataset):
         return self.data[item], self.label[item]
 
 
-
-
-
 def get_dimension(file):
     with open(file, 'r') as f:
         first_line = f.readline()
         words = first_line.split(",")
         return len(words)
+
 
 def merge_list(list1, list2):
     return list1 + list2
@@ -572,6 +576,7 @@ def construct_adj(graph, n_sample):
     # graph: n_node*n_node
     # '1' indicates connection, '0' for no-connection
     # return adj: n_node*n_sample
+    np.random.seed(4)
     n_node = graph.shape[0]
     adj = (-1)*np.ones((n_node, n_sample))
     for i in range(n_node):
@@ -751,12 +756,16 @@ if __name__ == '__main__':
     file      = np.load(filedpath)
 
     Features  = file['attmats'] #(n_node, n_time, att_dim)
-    print(Features.shape)
     f = rearrange(Features, 'b h w -> b (h w)')
     Labels    = file['labels']  #(n_node, num_classes)
     Graphs    = file['adjs']    #(n_time, n_node, n_node)
-
     Features = meanstd_normalization_tensor(Features)
+    # print("Graphs: ", Graphs.shape)
+    # print(Graphs)
+    # print("Features: ", Features.shape)
+    # print(Features)
+    # exit(0)
+
 
     #knn = 5
     dim_redu  = 5000 # should be set to the same size as 'att_dim'
@@ -770,7 +779,7 @@ if __name__ == '__main__':
     num_classes = 10
     tmp_dim = num_classes
 
-    batch_size = 8
+    batch_size = 3000
     # learning rate
     lr1 = 0.001
     lr2 = 0.0001
@@ -812,7 +821,8 @@ if __name__ == '__main__':
         Graphs[i,:,:] += np.eye(n_node, dtype=np.int32)
     model = Model(Features, Topology, n_hidden_units)
     pg = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.SGD(pg, lr=0.1, momentum=0.9, weight_decay=5E-5)
+    # Define optimization
+    optimizer = optim.Adam(pg, lr=0.01, weight_decay=5E-5)
     scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, eta_min=0.001, T_0=20)
     train_losses = []
     val_losses = []
@@ -825,14 +835,14 @@ if __name__ == '__main__':
     val_dataset = MyDataset(X_val_idx, y_val)
 
     train_loader = torch.utils.data.DataLoader(train_dataset,
-                                               batch_size=batch_size + 1,
+                                               batch_size=batch_size,
                                                shuffle=True,
                                                pin_memory=True,
                                                num_workers=1,
                                                )
 
     val_loader = torch.utils.data.DataLoader(val_dataset,
-                                             batch_size=batch_size + 1,
+                                             batch_size=batch_size,
                                              shuffle=True,
                                              pin_memory=True,
                                              num_workers=1,
@@ -845,7 +855,7 @@ if __name__ == '__main__':
         for i in range(n_steps):
             adj_tensor[i, :, :] = construct_adj(Graphs[i], n_sample)
             # print('former adj', adj.shape)
-
+            #
             # # denoise
             # # adj = sparse.csr_matrix(adj)
             # if not sparse.isspmatrix_coo(adj):
@@ -855,37 +865,24 @@ if __name__ == '__main__':
             #     adj = torch.from_numpy(adj)
             #     adj = adj.to_sparse()
             #
-            # # print(type(adj))
             # # indices = np.vstack(
             # #     (adj.row, adj.col))
             # # indices = adj.indices
             # shape = adj.shape
             # # adj = (indices, adj.data, adj.shape)
             # adj = adj.coalesce()
-            # # print('indices: ', adj.indices())
-            # # print('data: ', adj.values(), type(adj.values()), len(adj.values()))
-            # # print('shape: ', adj.size(), type(adj.size()))
-            # # adj = torch.sparse_coo_tensor(adj.indices(), adj.values(), adj.size()).type(torch.float32)
-            # # print(f.shape)
             # indice1 = adj.clone().indices()[1, :]
-            # # print('i1: ', indice1.shape)
             # indice0 = adj.clone().indices()[0, :]
-            # # print('i2: ', indice0.shape)
             # f1 = torch.FloatTensor(f)[indice1]
-            # # print(f1.shape)
+            #
             # f2 = torch.FloatTensor(f)[indice0]
             # adj_dense = adj.values()
-            # # print("stop1")
-            # # print(adj_dense.shape)
+            #
             # auv = torch.unsqueeze(adj_dense, -1)
-            # # print("stop2")
+            #
             # auv = adj_dense.type(torch.float64)
             # auv = torch.unsqueeze(auv, -1)
-            # # print("f1 shape: ", f1.shape)
-            # # print("f2 shape: ", f2.shape)
-            # # print("auv shape: ", auv.shape)
             # temp = torch.cat((f1, f2, auv), -1)
-            # # print('temp shape: ', temp.shape)
             # in_features = temp.shape[-1]
             # mlp3 = MLP_3(in_features)
             # temp = mlp3(temp)
@@ -895,18 +892,13 @@ if __name__ == '__main__':
             #
             # y = gumbel_softmax_sample(adj, shape, pi, 1, True)
             # y_dense = y.to_dense()
-            # # print("dense shape:", y_dense.shape)
-            #
             # top_k_v, top_k_i = torch.topk(y_dense, k)
             # input_min, min_indices  = torch.min(top_k_v, -1)
-            # # print(input_min)
             # kth = torch.add(input_min, eps)  # N,
             #
             # kth = torch.unsqueeze(kth, -1)
             # kth = torch.tile(kth, [1, n_sample])  # N,N
             #
-            # # print("y_dense: ", y_dense.shape)
-            # # print("kth: ", kth.shape)
             # mask2 = torch.ge(y_dense, kth)
             # mask2 = mask2.type(torch.float64)
             # dense_support = mask2
@@ -915,15 +907,11 @@ if __name__ == '__main__':
             # dense_support = dense_support + self_edge
             #
             # rowsum = torch.sum(dense_support, -1) + 1e-6  # to avoid NaN
-            # # print('rowsum: ', rowsum.shape)
             #
             # d_inv_sqrt = torch.reshape(torch.pow(rowsum, -0.5), [-1])  # D^-0.5
-            # # print(d_inv_sqrt.shape)
             # d_mat_inv_sqer = torch.diag(d_inv_sqrt)
             # ad = torch.matmul(d_mat_inv_sqer, dense_support)
-            # # print(d_mat_inv_sqer.shape, ad.shape)
             # dadt = torch.matmul(d_mat_inv_sqer, ad)
-            # # print(dadt.shape)
             #
             # adj_tensor[i, :, :] = dadt.clone()
         train_loader = tqdm(train_loader, file=sys.stdout)
@@ -931,26 +919,26 @@ if __name__ == '__main__':
         # training
         corrects = 0
         total = 0
-
+        print('\n----epoch {} ----'.format(epoch))
         for step, data in enumerate(train_loader):
             inputs, label = data
+            optimizer.zero_grad()
             samples_idx, support_sizes = sample_tf(inputs=inputs, n_layers=n_hop, sample_sizes=sample_sizes, adj_tensor=adj_tensor,
                                                    n_steps=n_steps)  # samples_idx: (n_steps)*inputs*(1+[0]+[1])
 
 
             # 6400*num_classes, 6400*T*M, 6400*r*T, 6400*r*M, T*6400*[0]*(1+[1]/[0])
-
             model._add_parameter(samples_idx, support_sizes)
+
             added = False
             if not added:
+
                 optimizer.param_groups.clear()
                 optimizer.state.clear()
                 optimizer.add_param_group(
                     {'params': [p for p in model.parameters() if p.requires_grad]}
                 )
                 added = True
-            print('\n', model)
-            exit(0)
             logits_batch, h_list_batch, Alpha, embedding_att, Beta, Gamma, h_list_batch_topo = model(inputs)
             # logits_batch, h_list_batch, Alpha, embedding_att, Beta, Gamma, h_list_batch_topo = mi_gru(Features, Topology,
             #                                                                                           inputs,
@@ -958,39 +946,44 @@ if __name__ == '__main__':
             #                                                                                           support_sizes,
             #                                                                                           n_hidden_units,
             #                                                                                           num_stacked_layers,
+            #
+            #
             #                                                                                           tmp_dim)
-            summary(model, input_size=inputs.shape)
+            # summary(model, input_size=(batch_size, ), mode='train', batch_dim=1)
             prediction = logits_batch # softmax row by row, 6400*num_classes
             preds = prediction.max(1)[1].type_as(label)
             labels = label.max(1)[1]
             correct = preds.eq(labels).double()
             corrects += correct.sum()
             total += len(labels)
+
             # L2 regularization for weights and biases
             # lambda_l2_reg = 5e-5
             reg_loss = 0
             for p in pg:
                 reg_loss += torch.mean(torch.norm(p.data))
+            # regularization for different hops of attentions
             lambda_reg_att = 0e-1
             reg_att_temp = torch.matmul(Alpha, torch.permute(Alpha, (0, 2, 1)))  # 6400*r*r
             I_mat = torch.tensor(np.eye(r), dtype=torch.float64)
             reg_att = torch.mean(torch.norm(reg_att_temp - I_mat))
 
-            loss_p = F.cross_entropy(logits_batch, label)
+            loss_p = F.cross_entropy(logits_batch, label, reduction='mean')
 
-            loss_op = torch.mean(loss_p)
-
-            train_loss = loss_op + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
+            # define loss
+            train_loss = loss_p + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
+            train_loss.backward()
             l_train = train_loss.detach().numpy()
-
             train_losses.append(l_train)
 
-            train_loss.backward()
+
+
+
 
             optimizer.step()
-            optimizer.zero_grad()
+
+
         scheduler.step()
-        print('\n----epoch {} ----'.format(epoch))
         print('train_acc: ', corrects / total)
         print("train_loss: ", np.mean(train_losses))
         # evaluation
@@ -999,6 +992,10 @@ if __name__ == '__main__':
         model.eval()
         for step, data in enumerate(val_loader):
             inputs, label = data
+            samples_idx, support_sizes = sample_tf(inputs=inputs, n_layers=n_hop, sample_sizes=sample_sizes,
+                                                   adj_tensor=adj_tensor,
+                                                   n_steps=n_steps)  # samples_idx: (n_steps)*inputs*(1+[0]+[1])
+            model._add_parameter(samples_idx, support_sizes)
             logits_batch, h_list_batch, Alpha, embedding_att, Beta, Gamma, h_list_batch_topo = model(inputs)
             # logits_batch, h_list_batch, Alpha, embedding_att, Beta, Gamma, h_list_batch_topo = mi_gru(Features, Topology,
             #                                                                                           inputs,
@@ -1025,11 +1022,10 @@ if __name__ == '__main__':
             I_mat = torch.tensor(np.eye(r), dtype=torch.float64)
             reg_att = torch.mean(torch.norm(reg_att_temp - I_mat))
 
-            loss_p = F.cross_entropy(logits_batch, label)
+            loss_p = F.cross_entropy(logits_batch, label, reduction='mean')
 
-            loss_op = torch.mean(loss_p)
 
-            val_loss = loss_op + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
+            val_loss = loss_p + lambda_l2_reg * reg_loss + lambda_reg_att * reg_att
             v_loss = val_loss.detach().numpy()
 
             val_losses.append(v_loss)
